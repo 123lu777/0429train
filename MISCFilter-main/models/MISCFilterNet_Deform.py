@@ -1,25 +1,20 @@
 """
-MISCFilterNet with Deformable Convolution
-使用可变形卷积的 MISCFilterNet 版本
-
-主要修改:
-1. 特征提取模块 feat_extract 使用可变形卷积
-2. Encoder/Decoder 中的 ResBlock 使用可变形卷积
-3. SCM/FAM 模块使用可变形卷积
+MISCFilterNet with Deformable Convolution (extended with optional motion guidance / transformer)
+使用可变形卷积的 MISCFilterNet 版本，增加了可选的 motion guidance 与 transformer bridge
 """
-
-import sys
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from models.layers_Deform import *
-from torch.nn.utils import weight_norm
 import models.MISCKernel_cuda as misckernel
+
+from models.motion_guidance import compute_orientation_map
+from models.polar_bridge import compute_polar_orientation_map
+from models.transformer_bridge import build_transformer
 
 
 class EBlock_Deform(nn.Module):
     """使用可变形卷积的编码块"""
-
     def __init__(self, out_channel, num_res=8, ResBlock=ResBlock_Deform_fft_bench):
         super(EBlock_Deform, self).__init__()
         layers = [ResBlock(out_channel) for _ in range(num_res)]
@@ -31,7 +26,6 @@ class EBlock_Deform(nn.Module):
 
 class DBlock_Deform(nn.Module):
     """使用可变形卷积的解码块"""
-
     def __init__(self, channel, num_res=8, ResBlock=ResBlock_Deform_fft_bench):
         super(DBlock_Deform, self).__init__()
         layers = [ResBlock(channel) for _ in range(num_res)]
@@ -43,7 +37,6 @@ class DBlock_Deform(nn.Module):
 
 class AFF_Deform(nn.Module):
     """使用可变形卷积的特征融合模块"""
-
     def __init__(self, in_channel, out_channel, BasicConv=BasicConv_Deform):
         super(AFF_Deform, self).__init__()
         self.conv = nn.Sequential(
@@ -58,7 +51,6 @@ class AFF_Deform(nn.Module):
 
 class SCM_Deform(nn.Module):
     """使用可变形卷积的浅层特征提取模块"""
-
     def __init__(self, out_plane, BasicConv=BasicConv_Deform, inchannel=3):
         super(SCM_Deform, self).__init__()
         self.main = nn.Sequential(
@@ -76,7 +68,6 @@ class SCM_Deform(nn.Module):
 
 class FAM_Deform(nn.Module):
     """使用可变形卷积的特征注意力模块"""
-
     def __init__(self, channel, BasicConv=BasicConv_Deform):
         super(FAM_Deform, self).__init__()
         self.merge = BasicConv(channel, channel, kernel_size=3, stride=1, relu=False)
@@ -87,16 +78,11 @@ class FAM_Deform(nn.Module):
         return out
 
 
-# 保持原有的辅助函数
 def CharbonnierFunc(data, epsilon=0.001):
     return torch.mean(torch.sqrt(data ** 2 + epsilon ** 2))
 
 
-def flow_warp(x,
-              flow,
-              interpolation='bilinear',
-              padding_mode='zeros',
-              align_corners=True):
+def flow_warp(x, flow, interpolation='bilinear', padding_mode='zeros', align_corners=True):
     if x.size()[-2:] != flow.size()[1:3]:
         raise ValueError(f'The spatial sizes of input ({x.size()[-2:]}) and '
                          f'flow ({flow.size()[1:3]}) are not the same.')
@@ -131,19 +117,8 @@ def flow_warp(x,
 
 class MISCKernelNet_Deform(nn.Module):
     """
-    使用可变形卷积的 MISCKernelNet
-
-    主要改进:
-    - 特征提取层 (feat_extract) 使用可变形卷积
-    - 编码器/解码器 (Encoder/Decoder) 使用可变形卷积的 ResBlock
-    - SCM/FAM 模块使用可变形卷积
-
-    参数:
-        use_deform_in_feat: 是否在 feat_extract 中使用可变形卷积 (默认 True)
-        use_deform_in_encoder: 是否在 Encoder/Decoder 中使用可变形卷积 (默认 True)
-        use_dcnv2:  是否使用 DCNv2 (带 mask，默认 True)
+    使用可变形卷积的 MISCKernelNet, 增加了 motion guidance 与 transformer 的可选集成
     """
-
     def __init__(self,
                  inp_channels=3,
                  out_channels=3,
@@ -152,14 +127,31 @@ class MISCKernelNet_Deform(nn.Module):
                  num_blocks_kernel=[1, 1, 1],
                  kernel_size=7,
                  inference=False,
-                 use_deform_in_feat=True,  # 新增：是否在特征提取中使用可变形卷积
-                 use_deform_in_encoder=True,  # 新增：是否在编码器中使用可变形卷积
+                 use_deform_in_feat=True,
+                 use_deform_in_encoder=True,
+                 # 新增参数
+                 use_motion_guidance=False,
+                 motion_guidance_mode='simple',
+                 use_polar_sampling=False,
+                 use_transformer=False,
+                 transformer_pretrained=None,
+                 freeze_transformer=True,
+                 transformer_img_size=128,  # 新增：传给 mdt(img_size=...)
                  ):
         super(MISCKernelNet_Deform, self).__init__()
         self.inference = inference
         self.dim = dim
         self.kernel_size = kernel_size
         self.kernel_pad = int((self.kernel_size - 1) / 2.0)
+
+        # motion/transformer flags 保存
+        self.use_motion_guidance = use_motion_guidance
+        self.motion_guidance_mode = motion_guidance_mode
+        self.use_polar_sampling = use_polar_sampling
+        self.use_transformer = use_transformer
+        self.transformer_pretrained = transformer_pretrained
+        self.freeze_transformer = freeze_transformer
+        self.transformer_img_size = transformer_img_size
 
         # 根据模式选择卷积类型
         if not inference:
@@ -185,6 +177,24 @@ class MISCKernelNet_Deform(nn.Module):
 
         base_channel = dim
 
+        # 如果启用 motion guidance，创建一个小的投影层（1 -> inp_channels）以便非侵入性融合
+        if self.use_motion_guidance:
+            self.motion_proj = nn.Sequential(
+                nn.Conv2d(1, inp_channels, kernel_size=1, stride=1, padding=0),
+                nn.ReLU(inplace=True),
+            )
+
+        # transformer bridge：作用在 res2（通道=base_channel*2）
+        if self.use_transformer:
+            self.transformer = build_transformer(
+                channels=base_channel * 2,
+                pretrained=transformer_pretrained,
+                img_size=self.transformer_img_size
+            )
+            if self.freeze_transformer:
+                for p in self.transformer.parameters():
+                    p.requires_grad = False
+
         # ============================================
         # 编码器 - 使用可变形卷积的 ResBlock
         # ============================================
@@ -201,7 +211,6 @@ class MISCKernelNet_Deform(nn.Module):
             BasicConv(inp_channels, base_channel, kernel_size=3, relu=True, stride=1),
             BasicConv(base_channel, base_channel * 2, kernel_size=3, relu=True, stride=2),
             BasicConv(base_channel * 2, base_channel * 4, kernel_size=3, relu=True, stride=2),
-            # 转置卷积用于上采样，不使用可变形卷积
             BasicConv(base_channel * 4 * 2, base_channel * 2, kernel_size=4, relu=True, stride=2, transpose=True),
             BasicConv(base_channel * 2 * 2, base_channel, kernel_size=4, relu=True, stride=2, transpose=True),
         ])
@@ -215,23 +224,16 @@ class MISCKernelNet_Deform(nn.Module):
             DBlock_Deform(base_channel, num_blocks[0], ResBlock=ResBlock)
         ])
 
-        # 1x1 卷积保持不变
         self.Convs = nn.ModuleList([
             BasicConv(base_channel * 4, base_channel * 2, kernel_size=1, relu=True, stride=1),
             BasicConv(base_channel * 2, base_channel, kernel_size=1, relu=True, stride=1),
         ])
 
-        # ============================================
-        # 特征融合模块 - 使用可变形卷积
-        # ============================================
         self.AFFs = nn.ModuleList([
             AFF_Deform(base_channel * 7, base_channel * 1, BasicConv=BasicConv),
             AFF_Deform(base_channel * 7, base_channel * 2, BasicConv=BasicConv)
         ])
 
-        # ============================================
-        # SCM/FAM 模块 - 使用可变形卷积
-        # ============================================
         self.FAM1 = FAM_Deform(base_channel * 4, BasicConv=BasicConv)
         self.SCM1 = SCM_Deform(base_channel * 4, BasicConv=BasicConv)
         self.FAM2 = FAM_Deform(base_channel * 2, BasicConv=BasicConv)
@@ -241,9 +243,6 @@ class MISCKernelNet_Deform(nn.Module):
         self.modulePad = torch.nn.ReplicationPad2d([self.kernel_pad, self.kernel_pad, self.kernel_pad, self.kernel_pad])
         self.moduleKernel = misckernel.FunctionKernel.apply
 
-        # ============================================
-        # Kernel 预测模块 - 使用可变形卷积
-        # ============================================
         self.KernelPredictFlow = nn.ModuleList([
             BasicConv(base_channel * 4, 2, kernel_size=3, relu=False, stride=1),
             BasicConv(base_channel * 2, 2, kernel_size=3, relu=False, stride=1),
@@ -295,6 +294,14 @@ class MISCKernelNet_Deform(nn.Module):
         ])
 
     def forward(self, x):
+        # optional motion guidance: compute orientation-like map and fuse
+        if self.use_motion_guidance:
+            try:
+                motion_map = compute_polar_orientation_map(x, mode=self.motion_guidance_mode)
+            except Exception:
+                motion_map = compute_polar_orientation_map(x, mode='simple')
+            motion_proj = self.motion_proj(motion_map)  # project to inp_channels
+            x = x + motion_proj
 
         x_2 = F.interpolate(x, scale_factor=0.5)
         x_4 = F.interpolate(x_2, scale_factor=0.5)
@@ -316,6 +323,17 @@ class MISCKernelNet_Deform(nn.Module):
         z = self.feat_extract[2](res2)
         z = self.FAM1(z, z4)
         z = self.Encoder[2](z)
+
+        # optional transformer fusion: apply on res2
+        if self.use_transformer:
+            try:
+                res2_t = self.transformer(res2)
+                if res2_t.shape == res2.shape:
+                    res2 = res2 + res2_t
+                else:
+                    print(f"[WARN] transformer output shape {tuple(res2_t.shape)} != res2 {tuple(res2.shape)}; skipping add")
+            except Exception as e:
+                print("[WARN] transformer forward failed, skipping transformer this iter. Err:", e)
 
         z12 = F.interpolate(res1, scale_factor=0.5)
         z21 = F.interpolate(res2, scale_factor=2)
@@ -447,54 +465,11 @@ class MISCKernelNet_Deform(nn.Module):
         if not self.inference:
             outputs.append(out)
             outputs_fil.append(x)
-
-            s1_Alpha = torch.mean(s1_kernal_weight * s1_kernal_alpha, dim=1, keepdim=True)
-            s1_Beta = torch.mean(s1_kernal_weight * s1_kernal_beta, dim=1, keepdim=True)
-            loss_s1_Alpha = CharbonnierFunc(s1_Alpha[:, :, :, :-1] - s1_Alpha[:, :, :, 1:]) + CharbonnierFunc(
-                s1_Alpha[:, :, :-1, :] - s1_Alpha[:, :, 1:, :])
-            loss_s1_Beta = CharbonnierFunc(s1_Beta[:, :, :, :-1] - s1_Beta[:, :, :, 1:]) + CharbonnierFunc(
-                s1_Beta[:, :, :-1, :] - s1_Beta[:, :, 1:, :])
-            Kernal_Loss += loss_s1_Alpha
-            Kernal_Loss += loss_s1_Beta
-
             return outputs[::-1], outputs_fil[::-1]
         else:
             return out
 
 
-# =============================================
-# 便捷函数：创建模型
-# =============================================
-
 def build_MISCKernelNet_Deform(inference=False, **kwargs):
-    """
-    创建使用可变形卷积的 MISCKernelNet
-
-    用法示例:
-        # 训练模式
-        model = build_MISCKernelNet_Deform(inference=False)
-
-        # 推理模式
-        model = build_MISCKernelNet_Deform(inference=True)
-
-        # 只在特征提取中使用可变形卷积
-        model = build_MISCKernelNet_Deform(inference=False, use_deform_in_feat=True, use_deform_in_encoder=False)
-    """
+    """创建使用可变形卷积的 MISCKernelNet（支持额外 kwargs）"""
     return MISCKernelNet_Deform(inference=inference, **kwargs)
-
-
-if __name__ == '__main__':
-    # 测试代码
-    model = build_MISCKernelNet_Deform(inference=False)
-
-    # 打印模型结构
-    total_params = sum(p.numel() for p in model.parameters())
-    print(f"模型总参数: {total_params:,}")
-
-    # 测试前向传播
-    x = torch.randn(2, 3, 256, 256)
-    outputs, outputs_fil = model(x)
-    print(f"输入形状: {x.shape}")
-    print(f"输出数量: {len(outputs)}")
-    for i, out in enumerate(outputs):
-        print(f"输出 {i} 形状: {out.shape}")
