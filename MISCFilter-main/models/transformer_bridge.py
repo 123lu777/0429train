@@ -95,7 +95,10 @@ def _load_pretrained(model, pretrained):
             f"Pretrained weights not found at {pretrained}. Initializing transformer with random weights."
         )
         return
-    state = torch.load(pretrained, map_location='cpu')
+    try:
+        state = torch.load(pretrained, map_location='cpu', weights_only=True)
+    except TypeError:
+        state = torch.load(pretrained, map_location='cpu')
     state_dict = state.get('state_dict', state)
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
     if missing or unexpected:
