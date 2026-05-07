@@ -87,13 +87,21 @@ def _load_pretrained(model, pretrained):
     if not pretrained:
         return
     if not os.path.exists(pretrained):
-        warnings.warn(f"transformer pretrained not found: {pretrained}. Skipping load.")
+        warnings.warn(
+            f"Pretrained weights not found at {pretrained}. Initializing transformer with random weights."
+        )
         return
     state = torch.load(pretrained, map_location='cpu')
     state_dict = state.get('state_dict', state)
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
     if missing or unexpected:
-        warnings.warn(f"transformer pretrained load: missing={len(missing)} unexpected={len(unexpected)}")
+        missing_preview = ', '.join(missing[:5])
+        unexpected_preview = ', '.join(unexpected[:5])
+        warnings.warn(
+            "Transformer pretrained load mismatch: "
+            f"missing={len(missing)} [{missing_preview}] "
+            f"unexpected={len(unexpected)} [{unexpected_preview}]"
+        )
 
 
 def build_transformer(channels, pretrained=None, img_size=None, prior_channels=4):

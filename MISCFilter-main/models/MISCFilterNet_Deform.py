@@ -200,6 +200,9 @@ class MISCKernelNet_Deform(nn.Module):
             if self.freeze_transformer:
                 for p in self.transformer.parameters():
                     p.requires_grad = False
+            self._transformer_dist_support = self._detect_transformer_dist_support()
+        else:
+            self._transformer_dist_support = None
 
         # ============================================
         # 编码器 - 使用可变形卷积的 ResBlock
@@ -305,12 +308,13 @@ class MISCKernelNet_Deform(nn.Module):
         dtype = feat.dtype
         xs = torch.linspace(-1.0, 1.0, w, device=device, dtype=dtype)
         ys = torch.linspace(-1.0, 1.0, h, device=device, dtype=dtype)
-        if 'indexing' in torch.meshgrid.__code__.co_varnames:
+        try:
             grid_y, grid_x = torch.meshgrid(ys, xs, indexing='ij')
-        else:
+        except TypeError:
             grid_y, grid_x = torch.meshgrid(ys, xs)
         dist = torch.sqrt(grid_x ** 2 + grid_y ** 2)
-        coord = torch.stack([grid_x, grid_y, dist], dim=0).unsqueeze(0).repeat(b, 1, 1, 1)
+        bias = torch.ones_like(dist)
+        coord = torch.stack([grid_x, grid_y, dist, bias], dim=0).unsqueeze(0).repeat(b, 1, 1, 1)
         return coord
 
     def _build_transformer_dist(self, feat):
@@ -322,17 +326,24 @@ class MISCKernelNet_Deform(nn.Module):
         dist = dist_value.view(1, -1).repeat(feat.size(0), 1)
         return dist
 
-    def _transformer_forward(self, feat, dist):
-        if dist is None:
-            return self.transformer(feat)
+    def _detect_transformer_dist_support(self):
         try:
             sig = inspect.signature(self.transformer.forward)
             if any(p.kind == p.VAR_KEYWORD for p in sig.parameters.values()) or 'dist' in sig.parameters:
-                return self.transformer(feat, dist=dist)
+                return 'keyword'
             if len(sig.parameters) >= 2:
-                return self.transformer(feat, dist)
+                return 'positional'
         except (TypeError, ValueError):
-            pass
+            return 'unknown'
+        return 'none'
+
+    def _transformer_forward(self, feat, dist):
+        if dist is None or self._transformer_dist_support in (None, 'none'):
+            return self.transformer(feat)
+        if self._transformer_dist_support == 'keyword':
+            return self.transformer(feat, dist=dist)
+        if self._transformer_dist_support == 'positional':
+            return self.transformer(feat, dist)
         return self.transformer(feat)
 
     def forward(self, x, dist=None):
