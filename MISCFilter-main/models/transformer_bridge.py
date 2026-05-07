@@ -1,4 +1,5 @@
 import os
+import warnings
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -86,13 +87,13 @@ def _load_pretrained(model, pretrained):
     if not pretrained:
         return
     if not os.path.exists(pretrained):
-        print(f"[WARN] transformer pretrained not found: {pretrained}. Skipping load.")
+        warnings.warn(f"transformer pretrained not found: {pretrained}. Skipping load.")
         return
     state = torch.load(pretrained, map_location='cpu')
     state_dict = state.get('state_dict', state)
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
     if missing or unexpected:
-        print(f"[WARN] transformer pretrained load: missing={len(missing)} unexpected={len(unexpected)}")
+        warnings.warn(f"transformer pretrained load: missing={len(missing)} unexpected={len(unexpected)}")
 
 
 def build_transformer(channels, pretrained=None, img_size=None, prior_channels=4):

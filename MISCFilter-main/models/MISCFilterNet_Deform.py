@@ -2,6 +2,7 @@
 MISCFilterNet with Deformable Convolution (extended with optional motion guidance / transformer)
 使用可变形卷积的 MISCFilterNet 版本，增加了可选的 motion guidance 与 transformer bridge
 """
+import inspect
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -325,12 +326,14 @@ class MISCKernelNet_Deform(nn.Module):
         if dist is None:
             return self.transformer(feat)
         try:
-            return self.transformer(feat, dist=dist)
-        except TypeError:
-            try:
+            sig = inspect.signature(self.transformer.forward)
+            if any(p.kind == p.VAR_KEYWORD for p in sig.parameters.values()) or 'dist' in sig.parameters:
+                return self.transformer(feat, dist=dist)
+            if len(sig.parameters) >= 2:
                 return self.transformer(feat, dist)
-            except TypeError:
-                return self.transformer(feat)
+        except (TypeError, ValueError):
+            pass
+        return self.transformer(feat)
 
     def forward(self, x, dist=None):
         # optional motion guidance: compute orientation-like map and fuse
