@@ -311,6 +311,7 @@ class MISCKernelNet_Deform(nn.Module):
         try:
             grid_y, grid_x = torch.meshgrid(ys, xs, indexing='ij')
         except TypeError:
+            # older torch default indexing is 'ij'
             grid_y, grid_x = torch.meshgrid(ys, xs)
         dist = torch.sqrt(grid_x ** 2 + grid_y ** 2)
         bias = torch.ones_like(dist)
@@ -329,9 +330,16 @@ class MISCKernelNet_Deform(nn.Module):
     def _detect_transformer_dist_support(self):
         try:
             sig = inspect.signature(self.transformer.forward)
-            if any(p.kind == p.VAR_KEYWORD for p in sig.parameters.values()) or 'dist' in sig.parameters:
+            params = list(sig.parameters.values())
+            if any(p.kind == p.VAR_KEYWORD for p in params):
                 return 'keyword'
-            if len(sig.parameters) >= 2:
+            if 'dist' in sig.parameters:
+                dist_param = sig.parameters['dist']
+                if dist_param.kind in (inspect.Parameter.KEYWORD_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
+                    return 'keyword'
+                if dist_param.kind == inspect.Parameter.POSITIONAL_ONLY:
+                    return 'positional'
+            if len(params) >= 2:
                 return 'positional'
         except (TypeError, ValueError):
             return 'unknown'
@@ -380,6 +388,7 @@ class MISCKernelNet_Deform(nn.Module):
         # optional transformer fusion: apply on res2
         if self.use_transformer:
             try:
+                # If caller provides dist, it takes priority over generated prior.
                 dist_to_use = dist if dist is not None else self._build_transformer_dist(res2)
                 res2_t = self._transformer_forward(res2, dist_to_use)
                 if res2_t.shape == res2.shape:

@@ -95,12 +95,18 @@ def _load_pretrained(model, pretrained):
     state_dict = state.get('state_dict', state)
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
     if missing or unexpected:
-        missing_preview = ', '.join(missing[:5])
-        unexpected_preview = ', '.join(unexpected[:5])
+        def _preview(keys):
+            if not keys:
+                return 'none'
+            preview = ', '.join([str(k) for k in keys[:5]])
+            if len(keys) > 5:
+                preview += f", ... (+{len(keys) - 5} more)"
+            return preview
+
         warnings.warn(
             "Transformer pretrained load mismatch: "
-            f"missing={len(missing)} [{missing_preview}] "
-            f"unexpected={len(unexpected)} [{unexpected_preview}]"
+            f"missing={len(missing)} [{_preview(missing)}] "
+            f"unexpected={len(unexpected)} [{_preview(unexpected)}]"
         )
 
 
