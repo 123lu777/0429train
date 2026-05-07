@@ -98,7 +98,10 @@ def _load_pretrained(model, pretrained):
     try:
         state = torch.load(pretrained, map_location='cpu', weights_only=True)
     except TypeError:
-        state = torch.load(pretrained, map_location='cpu')
+        warnings.warn(
+            "weights_only is not supported by this torch version; skipping pretrained load for safety."
+        )
+        return
     state_dict = state.get('state_dict', state)
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
     if missing or unexpected:

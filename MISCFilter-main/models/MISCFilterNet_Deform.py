@@ -157,6 +157,7 @@ class MISCKernelNet_Deform(nn.Module):
         self.transformer_img_size = transformer_img_size
         self.transformer_dist_mode = transformer_dist_mode
         self.transformer_dist_value = transformer_dist_value
+        self._meshgrid_supports_indexing = 'indexing' in inspect.signature(torch.meshgrid).parameters
 
         # 根据模式选择卷积类型
         if not inference:
@@ -308,7 +309,7 @@ class MISCKernelNet_Deform(nn.Module):
         dtype = feat.dtype
         xs = torch.linspace(-1.0, 1.0, w, device=device, dtype=dtype)
         ys = torch.linspace(-1.0, 1.0, h, device=device, dtype=dtype)
-        if 'indexing' in inspect.signature(torch.meshgrid).parameters:
+        if self._meshgrid_supports_indexing:
             grid_y, grid_x = torch.meshgrid(ys, xs, indexing='ij')
         else:
             grid_y, grid_x = torch.meshgrid(ys, xs)
