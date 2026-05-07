@@ -138,7 +138,7 @@ class MISCKernelNet_Deform(nn.Module):
                  transformer_pretrained=None,
                  freeze_transformer=True,
                  transformer_img_size=128,  # 新增：传给 mdt(img_size=...)
-                 transformer_dist_mode='dummy',  # dummy | none | coord
+                 transformer_dist_mode='dummy',  # dummy: static dist_value | none: no dist | coord: coordinate prior
                  transformer_dist_value=(0.5, 0.5, 0.5, 0.5),
                   ):
         super(MISCKernelNet_Deform, self).__init__()
@@ -308,10 +308,9 @@ class MISCKernelNet_Deform(nn.Module):
         dtype = feat.dtype
         xs = torch.linspace(-1.0, 1.0, w, device=device, dtype=dtype)
         ys = torch.linspace(-1.0, 1.0, h, device=device, dtype=dtype)
-        try:
+        if 'indexing' in inspect.signature(torch.meshgrid).parameters:
             grid_y, grid_x = torch.meshgrid(ys, xs, indexing='ij')
-        except TypeError:
-            # older torch default indexing is 'ij'
+        else:
             grid_y, grid_x = torch.meshgrid(ys, xs)
         dist = torch.sqrt(grid_x ** 2 + grid_y ** 2)
         bias = torch.ones_like(dist)
@@ -355,6 +354,9 @@ class MISCKernelNet_Deform(nn.Module):
         return self.transformer(feat)
 
     def forward(self, x, dist=None):
+        """
+        dist: optional prior for transformer. If provided, it overrides the generated prior.
+        """
         # optional motion guidance: compute orientation-like map and fuse
         if self.use_motion_guidance:
             try:

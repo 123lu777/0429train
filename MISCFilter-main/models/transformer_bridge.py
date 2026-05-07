@@ -57,6 +57,10 @@ class _PriorEncoder(nn.Module):
         elif prior.dim() == 4 and prior.shape[2:] != target_hw:
             prior = F.interpolate(prior, size=target_hw, mode='bilinear', align_corners=False)
         if prior.dim() == 4 and prior.size(1) != self.in_channels:
+            warnings.warn(
+                f"Transformer prior channel mismatch: expected {self.in_channels}, got {prior.size(1)}. "
+                "Auto-adjusting channels."
+            )
             if prior.size(1) < self.in_channels:
                 pad = self.in_channels - prior.size(1)
                 prior = torch.cat([prior, prior.new_zeros(prior.size(0), pad, prior.size(2), prior.size(3))], dim=1)
@@ -98,7 +102,7 @@ def _load_pretrained(model, pretrained):
         def _preview(keys):
             if not keys:
                 return 'none'
-            preview = ', '.join([str(k) for k in keys[:5]])
+            preview = ', '.join(keys[:5])
             if len(keys) > 5:
                 preview += f", ... (+{len(keys) - 5} more)"
             return preview
