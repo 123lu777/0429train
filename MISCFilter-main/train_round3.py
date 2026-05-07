@@ -92,6 +92,10 @@ class Config:
     # 增加 feat_to_rgb/rgb_to_feat，确保 bridge 的两个 1x1 conv 也会进入 transformer 组
     transformer_param_keywords = ["transformer", "mdt", "attn", "feat_to_rgb", "rgb_to_feat"]
 
+    # transformer dist/prior mode: dummy | none | coord
+    transformer_dist_mode = "dummy"
+    transformer_dist_value = (0.5, 0.5, 0.5, 0.5)
+
     # AMP and accumulation
     use_amp = True
     grad_accum_steps = 1
@@ -132,17 +136,19 @@ best_psnr = 0.0
 best_epoch = 0
 
 ######### Model ###########
-model_restoration = myNet(
-    use_deform_in_feat=args.use_deform_in_feat,
-    use_deform_in_encoder=args.use_deform_in_encoder,
-    use_motion_guidance=args.use_motion_guidance,
-    motion_guidance_mode=args.motion_guidance_mode,
-    use_polar_sampling=args.use_polar_sampling,
-    use_transformer=args.use_transformer,
-    transformer_pretrained=(args.transformer_pretrained if args.transformer_pretrained else None),
-    freeze_transformer=args.freeze_transformer,
-    transformer_img_size=args.transformer_img_size,  # ★ 新增：传给 mdt(img_size)
-)
+    model_restoration = myNet(
+        use_deform_in_feat=args.use_deform_in_feat,
+        use_deform_in_encoder=args.use_deform_in_encoder,
+        use_motion_guidance=args.use_motion_guidance,
+        motion_guidance_mode=args.motion_guidance_mode,
+        use_polar_sampling=args.use_polar_sampling,
+        use_transformer=args.use_transformer,
+        transformer_pretrained=(args.transformer_pretrained if args.transformer_pretrained else None),
+        freeze_transformer=args.freeze_transformer,
+        transformer_img_size=args.transformer_img_size,  # ★ 新增：传给 mdt(img_size)
+        transformer_dist_mode=args.transformer_dist_mode,
+        transformer_dist_value=args.transformer_dist_value,
+    )
 
 total_num, trainable_num = get_parameter_number(model_restoration)
 print("=" * 60)

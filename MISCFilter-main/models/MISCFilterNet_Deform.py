@@ -137,7 +137,9 @@ class MISCKernelNet_Deform(nn.Module):
                  transformer_pretrained=None,
                  freeze_transformer=True,
                  transformer_img_size=128,  # 新增：传给 mdt(img_size=...)
-                 ):
+                 transformer_dist_mode='dummy',  # dummy | none | coord
+                 transformer_dist_value=(0.5, 0.5, 0.5, 0.5),
+                  ):
         super(MISCKernelNet_Deform, self).__init__()
         self.inference = inference
         self.dim = dim
@@ -152,6 +154,8 @@ class MISCKernelNet_Deform(nn.Module):
         self.transformer_pretrained = transformer_pretrained
         self.freeze_transformer = freeze_transformer
         self.transformer_img_size = transformer_img_size
+        self.transformer_dist_mode = transformer_dist_mode
+        self.transformer_dist_value = transformer_dist_value
 
         # 根据模式选择卷积类型
         if not inference:
@@ -189,7 +193,8 @@ class MISCKernelNet_Deform(nn.Module):
             self.transformer = build_transformer(
                 channels=base_channel * 2,
                 pretrained=transformer_pretrained,
-                img_size=self.transformer_img_size
+                img_size=self.transformer_img_size,
+                prior_channels=4
             )
             if self.freeze_transformer:
                 for p in self.transformer.parameters():
@@ -293,7 +298,41 @@ class MISCKernelNet_Deform(nn.Module):
             BasicConv(base_channel * 2, kernel_size ** 2, kernel_size=3, relu=False, stride=1),
         ])
 
-    def forward(self, x):
+    def _build_transformer_coord_prior(self, feat):
+        b, _, h, w = feat.shape
+        device = feat.device
+        dtype = feat.dtype
+        xs = torch.linspace(-1.0, 1.0, w, device=device, dtype=dtype)
+        ys = torch.linspace(-1.0, 1.0, h, device=device, dtype=dtype)
+        if 'indexing' in torch.meshgrid.__code__.co_varnames:
+            grid_y, grid_x = torch.meshgrid(ys, xs, indexing='ij')
+        else:
+            grid_y, grid_x = torch.meshgrid(ys, xs)
+        dist = torch.sqrt(grid_x ** 2 + grid_y ** 2)
+        coord = torch.stack([grid_x, grid_y, dist], dim=0).unsqueeze(0).repeat(b, 1, 1, 1)
+        return coord
+
+    def _build_transformer_dist(self, feat):
+        if self.transformer_dist_mode == 'none':
+            return None
+        if self.transformer_dist_mode == 'coord':
+            return self._build_transformer_coord_prior(feat)
+        dist_value = torch.tensor(self.transformer_dist_value, device=feat.device, dtype=feat.dtype)
+        dist = dist_value.view(1, -1).repeat(feat.size(0), 1)
+        return dist
+
+    def _transformer_forward(self, feat, dist):
+        if dist is None:
+            return self.transformer(feat)
+        try:
+            return self.transformer(feat, dist=dist)
+        except TypeError:
+            try:
+                return self.transformer(feat, dist)
+            except TypeError:
+                return self.transformer(feat)
+
+    def forward(self, x, dist=None):
         # optional motion guidance: compute orientation-like map and fuse
         if self.use_motion_guidance:
             try:
@@ -327,7 +366,8 @@ class MISCKernelNet_Deform(nn.Module):
         # optional transformer fusion: apply on res2
         if self.use_transformer:
             try:
-                res2_t = self.transformer(res2)
+                dist_to_use = dist if dist is not None else self._build_transformer_dist(res2)
+                res2_t = self._transformer_forward(res2, dist_to_use)
                 if res2_t.shape == res2.shape:
                     res2 = res2 + res2_t
                 else:
